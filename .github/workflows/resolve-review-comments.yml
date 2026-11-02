@@ -96,7 +96,7 @@ jobs:
           CLIENT_ID: ${{ inputs.client-id }}
           APP_ID: ${{ inputs.app-id }}
           COMMIT_TYPES: ${{ inputs.commit-types }}
-          # Byte-wise ranges, so [a-z] never matches uppercase letters.
+          # Some locales make [a-z] match uppercase letters too; the C locale limits it to lowercase.
           LC_ALL: C
         run: |
           if [ -z "$CLIENT_ID" ] && [ -z "$APP_ID" ]; then
@@ -194,7 +194,8 @@ jobs:
           gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
           gemini_model: ${{ inputs.gemini-model }}
           gemini_cli_version: ${{ inputs.gemini-cli-version }}
-          # The action runs Gemini with --yolo, so only file tools are allowed: no shell, no network.
+          # The action runs Gemini with --yolo, which approves every tool call, so this allowlist keeps it to
+          # file tools: no shell, no network.
           settings: |-
             {
               "model": { "maxSessionTurns": ${{ inputs.max-turns }} },
