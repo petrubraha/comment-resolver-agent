@@ -1,0 +1,30 @@
+# Copy to .github/workflows/resolve-review-comments.yml in the repository that should get review fixes.
+name: Resolve review comments
+
+on:
+  pull_request_review:
+    types: [submitted]
+  # Manual runs apply the workflow to an earlier review.
+  workflow_dispatch:
+    inputs:
+      pr-number:
+        description: Pull request number
+        required: true
+      review-id:
+        description: Review ID
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    uses: petrubraha/comment-resolver-agent/.github/workflows/resolve-review-comments.yml@v1
+    with:
+      client-id: ${{ vars.APP_CLIENT_ID }}
+      pr-number: ${{ inputs.pr-number }}
+      review-id: ${{ inputs.review-id }}
+      gemini-model: ${{ vars.GEMINI_MODEL || 'gemini-3.8-flash' }}
+    secrets:
+      APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
