@@ -1,4 +1,4 @@
-# comment-resolver-agent
+# Comment Resolver Agent
 
 A reusable GitHub Actions workflow that resolves pull request review comments with [Gemini CLI](https://github.com/google-gemini/gemini-cli), included as a submodule for reference. Submit a review with inline comments, and the agent applies them and pushes the fix to the pull request's branch.
 
@@ -8,7 +8,7 @@ The stock [run-gemini-cli](https://github.com/google-github-actions/run-gemini-c
 
 - **No mention needed:** submitting a review starts it. Approvals and empty reviews are ignored.
 - **Same branch:** the fix is pushed to the reviewed pull request, not to a new one.
-- **Checks run normally:** pushes come from your GitHub App, so your checks run on them. Pushes made with `GITHUB_TOKEN` start no workflows, which leaves required checks pending forever.
+- **Checks run normally:** pushes come from your GitHub App, so your checks run on them, see [Authentication](#authentication).
 - **Sandboxed model:** Gemini only reads and edits files. It has no shell, network, or token.
 
 ## How It Works
@@ -19,6 +19,30 @@ The stock [run-gemini-cli](https://github.com/google-github-actions/run-gemini-c
 4. Gemini CLI edits the files, then writes a commit message and a summary. The action runs Gemini with `--yolo`, which approves every tool call without asking, so the workflow's `tools.core` allowlist gives it file tools only.
 5. The workflow commits as `<app-slug>[bot]` and pushes. It refuses to push changes under `.github/` or to its own files.
 6. It posts a summary comment on the pull request: the commit, plus one bullet per comment.
+
+## Authentication
+
+The "Mint app token" step authenticates as the GitHub App:
+
+1. The workflow reads the App's private key from the `APP_PRIVATE_KEY` secret.
+2. It signs a JWT with the key. The JWT lasts 10 minutes and only proves the App's identity: it can't access repositories.
+3. It exchanges the JWT for an installation token. The token expires after 1 hour, works only on repositories where the App is installed, and has only the App's permissions.
+4. Later steps use the token, so the push and the comment appear as `<app-slug>[bot]`.
+
+The App's permissions cover what those steps do:
+
+- **Contents:** pushing the fix.
+- **Pull requests:** reading the review and its comments.
+- **Issues:** posting the summary comment.
+
+**Why not `GITHUB_TOKEN`:** GitHub ignores its pushes when triggering workflows, to prevent loops. Your checks never run on the fix, so a required check blocks the pull request.
+
+**Why not a personal access token:** it triggers workflows, but:
+
+- **Acts as you:** the bot's pushes and comments can't be told apart from yours.
+- **Long-lived:** a leaked token works until someone revokes it.
+- **Broad:** a classic token covers all your repositories, and a fine-grained one still needs manual renewal.
+- **Tied to your account:** if your access changes, every caller breaks.
 
 ## Setup
 
