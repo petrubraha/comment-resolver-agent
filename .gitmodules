@@ -1,0 +1,4 @@
+[submodule "gemini-cli"]
+	path = gemini-cli
+	url = https://github.com/google-gemini/gemini-cli
+	shallow = true
