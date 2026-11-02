@@ -1,0 +1,8 @@
+# Gemini CLI files from local test runs
+.gemini/
+.resolver/
+gemini-artifacts/
+
+# GitHub App credentials
+gha-creds-*.json
+*.pem
