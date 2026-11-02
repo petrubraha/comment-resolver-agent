@@ -1,0 +1,288 @@
+name: Resolve review comments
+
+# Reusable workflow: call it from a workflow triggered by `pull_request_review` (submitted),
+# or by `workflow_dispatch` with `pr-number` and `review-id` to resolve an earlier review.
+
+on:
+  workflow_call:
+    inputs:
+      client-id:
+        description: GitHub App Client ID. Takes precedence over `app-id`.
+        type: string
+        default: ''
+      app-id:
+        description: GitHub App ID. Deprecated by actions/create-github-app-token; prefer `client-id`.
+        type: string
+        default: ''
+      pr-number:
+        description: Pull request number. Defaults to the pull request of the triggering review.
+        type: string
+        default: ''
+      review-id:
+        description: Review ID. Defaults to the triggering review; setting it marks the run as manual.
+        type: string
+        default: ''
+      gemini-model:
+        description: Gemini model ID.
+        type: string
+        default: gemini-3.8-flash
+      gemini-cli-version:
+        description: Gemini CLI version to install, e.g. `latest` or a release such as `0.40.0`.
+        type: string
+        default: latest
+      commit-types:
+        description: 'Space-separated commit types allowed in `<type>: <summary>` messages.'
+        type: string
+        default: feat fix docs refactor test ci chore
+      fallback-commit-message:
+        description: Commit message used when Gemini's message doesn't match `commit-types`.
+        type: string
+        default: 'fix: address review comments'
+      instructions:
+        description: Extra project instructions appended to the prompt, e.g. which conventions files to read.
+        type: string
+        default: ''
+      max-turns:
+        description: Maximum number of Gemini session turns.
+        type: number
+        default: 40
+      timeout-minutes:
+        description: Job timeout in minutes.
+        type: number
+        default: 30
+    secrets:
+      APP_PRIVATE_KEY:
+        description: Private key of the GitHub App.
+        required: true
+      GEMINI_API_KEY:
+        description: Gemini API key from Google AI Studio.
+        required: true
+    outputs:
+      pushed:
+        description: '`true` when fixes were pushed, `false` when no change was needed.'
+        value: ${{ jobs.resolve.outputs.pushed }}
+      commit:
+        description: SHA of the pushed commit.
+        value: ${{ jobs.resolve.outputs.commit }}
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    name: Resolve review comments
+    # Manual runs, or submitted reviews (not approvals) by people with write access on open pull requests
+    # from the same repository. Fork pull requests are skipped: their runs get no secrets.
+    if: >-
+      inputs.review-id != '' || (
+        github.event_name == 'pull_request_review' &&
+        github.event.review.user.type == 'User' &&
+        github.event.review.state != 'approved' &&
+        github.event.pull_request.state == 'open' &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.review.author_association)
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    concurrency:
+      group: comment-resolver-agent-${{ github.repository }}-${{ inputs.pr-number || github.event.pull_request.number }}
+      cancel-in-progress: false
+    outputs:
+      pushed: ${{ steps.push.outputs.pushed }}
+      commit: ${{ steps.push.outputs.commit }}
+    steps:
+      - name: Check inputs
+        env:
+          CLIENT_ID: ${{ inputs.client-id }}
+          APP_ID: ${{ inputs.app-id }}
+          COMMIT_TYPES: ${{ inputs.commit-types }}
+          # Some locales make [a-z] match uppercase letters too; the C locale limits it to lowercase.
+          LC_ALL: C
+        run: |
+          if [ -z "$CLIENT_ID" ] && [ -z "$APP_ID" ]; then
+            echo "::error::Set the client-id input (or the deprecated app-id input)."
+            exit 1
+          fi
+          if ! [[ "$COMMIT_TYPES" =~ ^[a-z]+( [a-z]+)*$ ]]; then
+            echo "::error::commit-types must be lowercase words separated by single spaces."
+            exit 1
+          fi
+
+      - name: Mint app token
+        id: app_token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ inputs.client-id }}
+          app-id: ${{ inputs.client-id == '' && inputs.app-id || '' }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Look up the pull request
+        id: pr
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ inputs.pr-number || github.event.pull_request.number }}
+        run: |
+          if ! [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
+            echo "::error::No pull request number: pass pr-number for manual runs."
+            exit 1
+          fi
+          pull_request=$(gh api "repos/$REPOSITORY/pulls/$PR_NUMBER")
+          state=$(jq -r '.state' <<< "$pull_request")
+          head_repo=$(jq -r '.head.repo.full_name' <<< "$pull_request")
+          head_ref=$(jq -r '.head.ref' <<< "$pull_request")
+          if [ "$state" != "open" ] || [ "$head_repo" != "$REPOSITORY" ]; then
+            echo "::error::Pull request #$PR_NUMBER must be open and come from this repository."
+            exit 1
+          fi
+          echo "number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "head_ref=$head_ref" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the pull request branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.pr.outputs.head_ref }}
+          # The token stays off disk while Gemini runs; the push step passes it explicitly.
+          persist-credentials: false
+
+      # Writes .resolver/review-comments.json, for example:
+      # {
+      #   "review_summary": "Looks good, two small fixes.",
+      #   "inline_comments": [
+      #     {
+      #       "path": "menu/pricing.py",
+      #       "line": 12,
+      #       "comment": "Use a named constant for the delivery fee",
+      #       "diff_hunk": "@@ -10,3 +10,4 @@ def order_total(pizzas):\n+    return subtotal + 2.5"
+      #     }
+      #   ]
+      # }
+      - name: Collect review comments
+        id: comments
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          REVIEW_ID: ${{ inputs.review-id || github.event.review.id }}
+        run: |
+          if ! [[ "$REVIEW_ID" =~ ^[0-9]+$ ]]; then
+            echo "::error::No review ID: pass review-id for manual runs."
+            exit 1
+          fi
+          # Outside .gemini/ on purpose: Gemini CLI won't read files that .gitignore covers.
+          mkdir -p .resolver
+          review_body=$(gh api "repos/$REPOSITORY/pulls/$PR_NUMBER/reviews/$REVIEW_ID" --jq '.body // ""')
+          gh api --paginate "repos/$REPOSITORY/pulls/$PR_NUMBER/reviews/$REVIEW_ID/comments" \
+            --jq '.[] | {path, line: (.line // .original_line), comment: .body, diff_hunk}' \
+            | jq -s --arg review "$review_body" '{review_summary: $review, inline_comments: .}' \
+            > .resolver/review-comments.json
+          comment_count=$(jq '.inline_comments | length' .resolver/review-comments.json)
+          if [ "$comment_count" -eq 0 ] && [ -z "$review_body" ]; then
+            echo "The review has no comments, nothing to resolve."
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Found $comment_count inline comments."
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run Gemini CLI
+        if: steps.comments.outputs.found == 'true'
+        uses: google-github-actions/run-gemini-cli@f77273f4c914e4bf38440cf36a0369cb64a37489 # v0.1.22
+        env:
+          GEMINI_CLI_TRUST_WORKSPACE: 'true'
+        with:
+          gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
+          gemini_model: ${{ inputs.gemini-model }}
+          gemini_cli_version: ${{ inputs.gemini-cli-version }}
+          # The action runs Gemini with --yolo, which approves every tool call, so this allowlist keeps it to
+          # file tools: no shell, no network.
+          settings: |-
+            {
+              "model": { "maxSessionTurns": ${{ inputs.max-turns }} },
+              "tools": {
+                "core": ["list_directory", "read_file", "read_many_files", "glob", "grep_search", "write_file", "replace"]
+              }
+            }
+          prompt: |-
+            You resolve pull request review comments in this repository.
+
+            1. Read `.resolver/review-comments.json`. It holds the review summary and the inline comments, each with
+               the file `path`, the `line`, the `comment` text, and the `diff_hunk` it refers to. When `line` is
+               null, the comment is outdated: locate the code through the end of its `diff_hunk`.
+            2. For each comment, read the file, make the requested change, and keep the change limited to what the
+               comment asks. If a comment is a question or is unclear, don't change code for it.
+            3. Follow the repository's conventions: read the README and any contributing or agent instruction files,
+               and read a file fully before editing it. Keep configuration and frontmatter syntax valid.
+            4. Never edit files under `.github/`, `.gemini/`, or `.resolver/` (except the two files below), and never
+               touch secrets.
+            5. Write a commit message to `.resolver/commit-message.txt`: one line, `<type>: <summary>`, where the type
+               is one of: ${{ inputs.commit-types }}. Keep the summary short and lowercase.
+            6. Write a short Markdown summary to `.resolver/summary.md`: one bullet per comment, with the file and what
+               you changed, or why you made no change.
+
+            ${{ inputs.instructions }}
+
+      - name: Commit and push the fixes
+        id: push
+        if: steps.comments.outputs.found == 'true'
+        env:
+          APP_TOKEN: ${{ steps.app_token.outputs.token }}
+          APP_SLUG: ${{ steps.app_token.outputs.app-slug }}
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
+          REPOSITORY: ${{ github.repository }}
+          HEAD_REF: ${{ steps.pr.outputs.head_ref }}
+          COMMIT_TYPES: ${{ inputs.commit-types }}
+          FALLBACK_MESSAGE: ${{ inputs.fallback-commit-message }}
+        run: |
+          # Stage everything, then unstage the workflow's own files (no error when they're absent or ignored).
+          git add -A
+          git rm -r -q --cached --ignore-unmatch -- .gemini .resolver gemini-artifacts 'gha-creds-*.json'
+          if git diff --cached --quiet; then
+            echo "Gemini made no changes."
+            echo "pushed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          forbidden=$(git diff --cached --name-only | grep -E '^(\.github/|\.gemini/|\.resolver/|gemini-artifacts/|gha-creds-)' || true)
+          if [ -n "$forbidden" ]; then
+            echo "::error::Gemini changed protected paths; nothing was pushed: $forbidden"
+            exit 1
+          fi
+          bot_name="${APP_SLUG}[bot]"
+          bot_id=$(gh api "users/${APP_SLUG}%5Bbot%5D" --jq .id)
+          git config user.name "$bot_name"
+          git config user.email "${bot_id}+${bot_name}@users.noreply.github.com"
+          message=$(head -n 1 .resolver/commit-message.txt 2>/dev/null || true)
+          type_pattern="^(${COMMIT_TYPES// /|}): .+"
+          if ! [[ "$message" =~ $type_pattern ]]; then
+            message="$FALLBACK_MESSAGE"
+          fi
+          git commit -q -m "$message"
+          git push -q "https://x-access-token:${APP_TOKEN}@github.com/${REPOSITORY}.git" "HEAD:${HEAD_REF}"
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Post a summary comment
+        if: always() && steps.comments.outputs.found == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          PUSHED: ${{ steps.push.outputs.pushed }}
+          COMMIT: ${{ steps.push.outputs.commit }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          {
+            if [ "$PUSHED" = "true" ]; then
+              echo "Pushed fixes for the review in ${COMMIT:0:7}."
+            elif [ "$PUSHED" = "false" ]; then
+              echo "No file changes were needed for the review."
+            else
+              echo "Resolving the review failed, see the [run logs]($RUN_URL)."
+            fi
+            if [ -f .resolver/summary.md ]; then
+              echo
+              cat .resolver/summary.md
+            fi
+          } > .resolver/comment.md
+          cat .resolver/comment.md >> "$GITHUB_STEP_SUMMARY"
+          gh pr comment "$PR_NUMBER" --repo "$REPOSITORY" --body-file .resolver/comment.md
