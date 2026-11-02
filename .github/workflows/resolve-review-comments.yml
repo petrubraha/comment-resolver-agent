@@ -145,6 +145,18 @@ jobs:
           # The token stays off disk while Gemini runs; the push step passes it explicitly.
           persist-credentials: false
 
+      # Writes .resolver/review-comments.json, for example:
+      # {
+      #   "review_summary": "Looks good, two small fixes.",
+      #   "inline_comments": [
+      #     {
+      #       "path": "menu/pricing.py",
+      #       "line": 12,
+      #       "comment": "Use a named constant for the delivery fee",
+      #       "diff_hunk": "@@ -10,3 +10,4 @@ def order_total(pizzas):\n+    return subtotal + 2.5"
+      #     }
+      #   ]
+      # }
       - name: Collect review comments
         id: comments
         env:
