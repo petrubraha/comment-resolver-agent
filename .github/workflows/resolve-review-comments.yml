@@ -7,13 +7,9 @@ on:
   workflow_call:
     inputs:
       client-id:
-        description: GitHub App Client ID. Takes precedence over `app-id`.
+        description: GitHub App Client ID.
         type: string
-        default: ''
-      app-id:
-        description: GitHub App ID. Deprecated by actions/create-github-app-token; prefer `client-id`.
-        type: string
-        default: ''
+        required: true
       pr-number:
         description: Pull request number. Defaults to the pull request of the triggering review.
         type: string
@@ -94,13 +90,13 @@ jobs:
       - name: Check inputs
         env:
           CLIENT_ID: ${{ inputs.client-id }}
-          APP_ID: ${{ inputs.app-id }}
           COMMIT_TYPES: ${{ inputs.commit-types }}
           # Some locales make [a-z] match uppercase letters too; the C locale limits it to lowercase.
           LC_ALL: C
         run: |
-          if [ -z "$CLIENT_ID" ] && [ -z "$APP_ID" ]; then
-            echo "::error::Set the client-id input (or the deprecated app-id input)."
+          # Required inputs can still be empty, e.g. when the caller's variable isn't set.
+          if [ -z "$CLIENT_ID" ]; then
+            echo "::error::The client-id input is empty: set it to the GitHub App's Client ID."
             exit 1
           fi
           if ! [[ "$COMMIT_TYPES" =~ ^[a-z]+( [a-z]+)*$ ]]; then
@@ -113,7 +109,6 @@ jobs:
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           client-id: ${{ inputs.client-id }}
-          app-id: ${{ inputs.client-id == '' && inputs.app-id || '' }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
 
       - name: Look up the pull request

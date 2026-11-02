@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.0.1
+
+- **Client ID only:** removes the `app-id` input, so `actions/create-github-app-token` no longer warns that `app-id` is deprecated. `client-id` is now required.
+
 ## v1.0.0
 
 - **Reusable workflow:** resolves submitted pull request reviews with Gemini CLI and pushes the fix to the reviewed branch as a GitHub App.

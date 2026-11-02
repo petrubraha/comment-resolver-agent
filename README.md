@@ -91,19 +91,18 @@ The workflow must exist on the default branch: GitHub only runs review-triggered
 
 ## Inputs
 
-| Input                     | Default                                | Description                                                     |
-| ------------------------- | -------------------------------------- | --------------------------------------------------------------- |
-| `client-id`               |                                        | GitHub App Client ID. Required unless `app-id` is set.          |
-| `app-id`                  |                                        | GitHub App ID, deprecated by `actions/create-github-app-token`. |
-| `pr-number`               | Triggering pull request                | Pull request number, for manual runs.                           |
-| `review-id`               | Triggering review                      | Review ID, for manual runs.                                     |
-| `gemini-model`            | `gemini-3.8-flash`                     | Gemini model ID.                                                |
-| `gemini-cli-version`      | `latest`                               | Gemini CLI version to install.                                  |
-| `commit-types`            | `feat fix docs refactor test ci chore` | Allowed types in `<type>: <summary>` commit messages.           |
-| `fallback-commit-message` | `fix: address review comments`         | Used when Gemini's message doesn't match `commit-types`.        |
-| `instructions`            |                                        | Extra project instructions appended to the prompt.              |
-| `max-turns`               | `40`                                   | Maximum Gemini session turns.                                   |
-| `timeout-minutes`         | `30`                                   | Job timeout.                                                    |
+| Input                     | Default                                | Description                                              |
+| ------------------------- | -------------------------------------- | -------------------------------------------------------- |
+| `client-id`               |                                        | GitHub App Client ID. Required.                          |
+| `pr-number`               | Triggering pull request                | Pull request number, for manual runs.                    |
+| `review-id`               | Triggering review                      | Review ID, for manual runs.                              |
+| `gemini-model`            | `gemini-3.8-flash`                     | Gemini model ID.                                         |
+| `gemini-cli-version`      | `latest`                               | Gemini CLI version to install.                           |
+| `commit-types`            | `feat fix docs refactor test ci chore` | Allowed types in `<type>: <summary>` commit messages.    |
+| `fallback-commit-message` | `fix: address review comments`         | Used when Gemini's message doesn't match `commit-types`. |
+| `instructions`            |                                        | Extra project instructions appended to the prompt.       |
+| `max-turns`               | `40`                                   | Maximum Gemini session turns.                            |
+| `timeout-minutes`         | `30`                                   | Job timeout.                                             |
 
 Secrets: `APP_PRIVATE_KEY` and `GEMINI_API_KEY`, both required. Outputs: `pushed` (`true` or `false`) and `commit` (the pushed SHA).
 
